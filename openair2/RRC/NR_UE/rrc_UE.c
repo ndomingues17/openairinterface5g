@@ -283,7 +283,7 @@ static void nr_rrc_process_ntnconfig(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *S
     nr_timer_start(&SI_info->SInfo_r17.sib19_timer);
 }
 
-static void nr_decode_SI(NR_UE_RRC_SI_INFO *SI_info, NR_SystemInformation_t *si, NR_UE_RRC_INST_t *rrc, int hfn, int frame)
+static void nr_decode_SI(NR_UE_RRC_SI_INFO *SI_info, NR_SystemInformation_t *si, NR_UE_RRC_INST_t *rrc, int hfn, int frame, int slot)
 {
   if (si->criticalExtensions.present != NR_SystemInformation__criticalExtensions_PR_systemInformation) {
     LOG_W(NR_RRC, "Not implemented SystemInformation criticalExtension version\n");
@@ -324,10 +324,33 @@ static void nr_decode_SI(NR_UE_RRC_SI_INFO *SI_info, NR_SystemInformation_t *si,
         SI_info->sib8_validity = true;
         nr_timer_start(&SI_info->sib8_timer);
         break;
-      case NR_SystemInformation_IEs__sib_TypeAndInfo__Member_PR_sib9:
-        SI_info->sib9_validity = true;
+      case NR_SystemInformation_IEs__sib_TypeAndInfo__Member_PR_sib9: {
+        NR_SIB9_t *sib9 = typeandinfo->choice.sib9;
+        uint64_t si_window_utc = 0;
+        if (asn_INTEGER2uint64(&sib9->timeInfo->timeInfoUTC, &si_window_utc) != 0)
+          AssertFatal(false, "asn_INTEGER2uint64(ti, &si_window_utc)\n");
+        uint64_t si_window_utc_ns = si_window_utc * 10000000ULL;
+        char si_window_time_str[64];
+        format_ns_since_1900_to_utc(si_window_utc_ns, si_window_time_str, sizeof(si_window_time_str));
+        LOG_I(NR_RRC, "SIB9 timeInfoUTC: %s\n", si_window_time_str);
+
+        int slots_per_frame = 10 * (1 << SI_info->scs);
+        int n_si_window_frames = (5 << SI_info->si_windowlength) / slots_per_frame + 1;
+        int current_si_window_frame = frame % (8 << SI_info->si_periodicity);
+        int sfn_boundary = n_si_window_frames - current_si_window_frame;
+        int current_slot_in_si_window = current_si_window_frame * slots_per_frame + slot;
+        int remaining_slots_to_sfn_boundary = sfn_boundary * slots_per_frame - current_slot_in_si_window;
+        uint64_t remaining_si_window_ns = remaining_slots_to_sfn_boundary * 1000000 / (1 << SI_info->scs);
+
+        char now_str[64];
+        uint64_t now_ns = si_window_utc_ns - remaining_si_window_ns;
+        format_ns_since_1900_to_utc(now_ns, now_str, sizeof(now_str));
+        LOG_I(NR_RRC, "Current time derived from SIB9: %s\n", now_str);
+
+        // Get next SIB9 regardless of SIB9 timer validity
+        SI_info->sib9_validity = false;
         nr_timer_start(&SI_info->sib9_timer);
-        break;
+      } break;
       case NR_SystemInformation_IEs__sib_TypeAndInfo__Member_PR_sib10_v1610:
         SI_info->sib10_validity = true;
         nr_timer_start(&SI_info->sib10_timer);
@@ -518,6 +541,8 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
   AssertFatal(sib1->servingCellConfigCommon, "configuration issue in SIB1\n");
   SI_info->scs = sib1->servingCellConfigCommon->downlinkConfigCommon.initialDownlinkBWP.genericParameters.subcarrierSpacing;
   SI_info->si_windowlength = (sib1->si_SchedulingInfo) ? sib1->si_SchedulingInfo->si_WindowLength : 0;
+  SI_info->si_periodicity =
+      (sib1->si_SchedulingInfo) ? sib1->si_SchedulingInfo->schedulingInfoList.list.array[0]->si_Periodicity : 0;
   // configure default SI
   nr_rrc_configure_default_SI(SI_info, sib1->si_SchedulingInfo, si_SchedInfo_v1700);
   rrc->is_NTN_UE = verify_NTN_access(SI_info, sib1_v1700);
@@ -1160,7 +1185,7 @@ static bool nr_rrc_process_reconfiguration_v1530(NR_UE_RRC_INST_t *rrc, NR_RRCRe
       SEQUENCE_free(&asn_DEF_NR_SystemInformation, si, 1);
     } else {
       RRCLOG_I("Decoding dedicatedSystemInformationDelivery\n");
-      nr_decode_SI(SI_info, si, rrc, rrc->current_hfn, rrc->current_frame);
+      nr_decode_SI(SI_info, si, rrc, rrc->current_hfn, rrc->current_frame, 0);
     }
   }
   if (rec_1530->otherConfig) {
@@ -2230,7 +2255,7 @@ static void nr_rrc_ue_decode_NR_BCCH_DL_SCH_Message(NR_UE_RRC_INST_t *rrc,
       case NR_BCCH_DL_SCH_MessageType__c1_PR_systemInformation:
         RRCLOG_I("%d:%d Decoding SI\n", frame, slot);
         NR_SystemInformation_t *si = bcch_message->message.choice.c1->choice.systemInformation;
-        nr_decode_SI(SI_info, si, rrc, hfn, frame);
+        nr_decode_SI(SI_info, si, rrc, hfn, frame, slot);
         break;
       case NR_BCCH_DL_SCH_MessageType__c1_PR_NOTHING:
       default:

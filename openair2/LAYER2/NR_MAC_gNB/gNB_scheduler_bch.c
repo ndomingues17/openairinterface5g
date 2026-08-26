@@ -659,7 +659,8 @@ static bool test_other_sib_sched_occasion(int window_pos,
   return res;
 }
 
-void schedule_nr_other_sib(nr_cell_sched_t *cell,
+void schedule_nr_other_sib(int sl_ahead,
+                           nr_cell_sched_t *cell,
                            frame_t frame,
                            slot_t slot,
                            nfapi_nr_dl_tti_request_t *DL_req,
@@ -733,6 +734,10 @@ void schedule_nr_other_sib(nr_cell_sched_t *cell,
                                         rel_slot[ssb]))
         continue;
 
+      for (int j = 0; j < schedulingInfo->sib_MappingInfo.list.count; j++) {
+        if (schedulingInfo->sib_MappingInfo.list.array[j]->type == NR_SIB_TypeInfo__type_sibType9)
+          nr_mac_refresh_sib9_timestamp(sl_ahead, cell, frame, slot, window_length_sl, 8 << schedulingInfo->si_Periodicity);
+      }
       other_sib_sched_control(cell, frame, slot, ssb, ss, DL_req, TX_req, 0);
     }
     if (!schedInfo17)

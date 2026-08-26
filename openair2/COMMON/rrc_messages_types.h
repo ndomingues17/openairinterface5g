@@ -25,6 +25,7 @@
 #include "NR_ServingCellConfigCommon.h"
 #include "NR_ServingCellConfig.h"
 #include "NR_SIB1.h"
+#include "NR_SIB9.h"
 #include "NR_SIB19-r17.h"
 #include "NR_CellGroupConfig.h"
 #include "NR_BCCH-BCH-Message.h"
@@ -454,6 +455,7 @@ typedef struct {
   bool can_start_ra;
 } nr_mac_rrc_config_sib1_t;
 typedef struct {
+  NR_SIB9_t *sib9;
   NR_SIB19_r17_t *sib19;
   int hfn;
   int frame;

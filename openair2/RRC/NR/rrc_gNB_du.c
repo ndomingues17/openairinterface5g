@@ -26,6 +26,7 @@
 #include "NR_SIB2.h"
 #include "NR_SIB3.h"
 #include "NR_SIB4.h"
+#include "NR_SIB9.h"
 #include "NR_Q-OffsetRange.h"
 #include "NR_asn_constant.h"
 #include "openair2/RRC/NR/MESSAGES/asn1_msg.h"
@@ -429,6 +430,29 @@ static NR_SIB4_t *get_sib4_inter_freq_neighbors(const neighbour_cell_configurati
   }
 
   return sib4;
+}
+
+static NR_SIB9_t *get_sib9()
+{
+  NR_SIB9_t *sib9 = calloc_or_fail(1, sizeof(*sib9));
+  sib9->timeInfo = calloc_or_fail(1, sizeof(*sib9->timeInfo));
+  /* timeInfoUTC is INTEGER_t (0..549755813887 does not fit in 32 bits):
+     value = number of 10 ms units since 00:00:00 on 1 Jan 1900 */
+  // Initialize timeInfoUTC with 0, it will be updated before being sent on ...
+  int rc = asn_uint642INTEGER(&sib9->timeInfo->timeInfoUTC,  0);
+  AssertFatal(rc == 0, "asn_uint642INTEGER() failed for timeInfoUTC\n");
+  sib9->timeInfo->dayLightSavingTime = calloc_or_fail(1, sizeof(*sib9->timeInfo->dayLightSavingTime));
+  BIT_STRING_t *str = sib9->timeInfo->dayLightSavingTime;
+  str->size = 1;
+  str->bits_unused = 6;
+  str->buf = calloc_or_fail(str->size, sizeof(str->buf[0]));
+  str->buf[0] = 0 & 0xC0;
+  sib9->timeInfo->leapSeconds = calloc_or_fail(1, sizeof(*sib9->timeInfo->leapSeconds));
+  *sib9->timeInfo->leapSeconds = 0;
+   sib9->timeInfo->localTimeOffset = calloc_or_fail(1, sizeof(*sib9->timeInfo->localTimeOffset));
+  *sib9->timeInfo->localTimeOffset = 0;
+
+  return sib9;
 }
 
 /** @brief Return the frequency of the SS block of the cell for which this message is included,
@@ -839,6 +863,22 @@ void rrc_gNB_process_f1_setup_req(f1ap_setup_req_t *req, sctp_assoc_t assoc_id)
             add_si_msg(&cell, sib->SIB_type, &enc);
             free_byte_array(enc);
             LOG_I(NR_RRC, "DU %ld: added SIB4 to F1 Setup Response (cell %ld)\n", du->gNB_DU_id, new->info.cell_id);
+          } break;
+          case NR_SIB_9: {
+            NR_SIB9_t *sib9 = get_sib9();
+            if (!sib9)
+              break;
+
+            byte_array_t enc = do_SIB9_NR(sib9);
+            ASN_STRUCT_FREE(asn_DEF_NR_SIB9, sib9);
+            if (!enc.buf || enc.len == 0) {
+              free_byte_array(enc);
+              LOG_E(NR_RRC, "SIB9 encoding failed\n");
+              break;
+            }
+            add_si_msg(&cell, sib->SIB_type, &enc);
+            free_byte_array(enc);
+            LOG_I(NR_RRC, "DU %ld: added SIB9 to F1 Setup Response (cell %ld)\n", du->gNB_DU_id, new->info.cell_id);
           } break;
           default:
             AssertFatal(false, "SIB%d not handled yet\n", sib->SIB_type);
