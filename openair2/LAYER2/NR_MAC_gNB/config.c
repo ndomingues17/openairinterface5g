@@ -19,8 +19,10 @@
 #include "NR_MIB.h"
 #include "NR_MAC_gNB/nr_mac_gNB.h"
 #include "NR_BCCH-BCH-Message.h"
+#include "NR_BCCH-DL-SCH-Message.h"
 #include "NR_ServingCellConfigCommon.h"
 #include "NR_MIB.h"
+#include "NR_SIB9.h"
 #include "SCHED_NR/phy_frame_config_nr.h"
 #include "T.h"
 #include "asn_internal.h"
@@ -35,6 +37,8 @@
 #include "nfapi_nr_interface.h"
 #include "nfapi_nr_interface_scf.h"
 #include "utils.h"
+#include <time.h>
+#include "openair2/RRC/NR/MESSAGES/asn1_msg.h"
 
 c16_t convert_precoder_weight(double complex c_in)
 {
@@ -1055,6 +1059,21 @@ bool nr_mac_configure_other_sib(nr_cell_sched_t *cell, int num_cu_sib, const f1a
         add_sib_to_systeminformation(sysInfo, type);
         break;
       }
+      case NR_SIB_9: {
+        struct NR_SystemInformation_IEs__sib_TypeAndInfo__Member *type = calloc_or_fail(1, sizeof(*type));
+        type->present = NR_SystemInformation_IEs__sib_TypeAndInfo__Member_PR_sib9;
+        NR_SIB9_t *sib9 = NULL;
+        asn_dec_rval_t dec_rval = uper_decode(NULL, &asn_DEF_NR_SIB9, (void **)&sib9, container->buf, container->len, 0, 0);
+        if (dec_rval.code != RC_OK) {
+          LOG_E(NR_MAC, "cannot decode SIB%d from CU\n", config_sibs[i]);
+          ASN_STRUCT_FREE(asn_DEF_NR_SIB9, sib9);
+          free(type);
+          break;
+        }
+        type->choice.sib9 = sib9;
+        add_sib_to_systeminformation(sysInfo, type);
+        break;
+      }
       default :
         AssertFatal(false, "Invalid or not supported SIB%d\n", config_sibs[i]);
     }
@@ -1089,6 +1108,74 @@ bool nr_mac_configure_other_sib(nr_cell_sched_t *cell, int num_cu_sib, const f1a
   ASN_STRUCT_FREE(asn_DEF_NR_SystemInformation_IEs, sysInfo);
   ASN_STRUCT_FREE(asn_DEF_NR_SystemInformation_IEs, sysInfov17);
   return true;
+}
+
+// This function re-encodes content belonging to SIB2/3/4/9 but only changes SIB9 data (timeInfoUTC)
+// 3GPP TS 38.470 V19.2.0 Section 5.2.2 System Information management function
+// The gNB-DU is responsible for the encoding of the SIB1 message, SIB10, SIB12, SIB13, SIB14, SIB15, SIB17,
+// SIB17bis, SIB18, SIB20, SIB22, SIB23 and SIB24, and the gNB-CU is responsible for the encoding of other SIBs. The
+// gNB-DU may re-encode SIB9. The gNB-DU is responsible for the generation of the SystemInformation message
+void nr_mac_refresh_sib9_timestamp(int sl_ahead, nr_cell_sched_t *cell, int frame, int slot, int si_window_length_sl, int si_periodicity_f)
+{
+  NR_COMMON_channels_t *cc = &cell->common_channels;
+
+  NR_BCCH_DL_SCH_Message_t *bcch_message = NULL;
+  asn_dec_rval_t dec_rval = uper_decode_complete(NULL,
+                                                 &asn_DEF_NR_BCCH_DL_SCH_Message,
+                                                 (void **)&bcch_message,
+                                                 (const void *)cc->other_sib_bcch_pdu[0],
+                                                 cc->other_sib_bcch_length[0]);
+  AssertFatal(dec_rval.code == RC_OK, "Decoding asn_DEF_NR_BCCH_DL_SCH_Message failed!\n");
+
+  NR_SystemInformation_IEs_t *sysInfo =
+      bcch_message->message.choice.c1->choice.systemInformation->criticalExtensions.choice.systemInformation;
+  if (sysInfo) {
+    for (int i = 0; i < sysInfo->sib_TypeAndInfo.list.count; i++) {
+      struct NR_SystemInformation_IEs__sib_TypeAndInfo__Member *m = sysInfo->sib_TypeAndInfo.list.array[i];
+      if (m->present == NR_SystemInformation_IEs__sib_TypeAndInfo__Member_PR_sib9) {
+        NR_SIB9_t *sib9 = m->choice.sib9;
+
+        int slots_per_frame = cell->frame_structure.numb_slots_frame;
+
+        // Coordinated Universal Time corresponding to the SFN boundary at or immediately after the ending boundary of the SI-window
+        // in which SIB9 is transmitted
+        int n_si_window_frames = si_window_length_sl / slots_per_frame + 1;
+        int current_si_window_frame = frame % si_periodicity_f;
+        int sfn_boundary = n_si_window_frames - current_si_window_frame;
+        int current_slot_in_si_window = current_si_window_frame * slots_per_frame + slot;
+        int remaining_slots_to_sfn_boundary = sfn_boundary * slots_per_frame + sl_ahead - current_slot_in_si_window;
+
+        NR_SubcarrierSpacing_t scs = *cc->ServingCellConfigCommon->ssbSubcarrierSpacing;
+        uint64_t remaining_si_window_ns = remaining_slots_to_sfn_boundary * 1000000 / (1 << scs);
+
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        const uint64_t ntp_unix_offset = 2208988800ULL; // 1900-01-01 -> 1970-01-01, in seconds
+        uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec; // how many nanoseconds have passed since 1970
+        uint64_t si_window_utc = (now_ns + remaining_si_window_ns + 10000000ULL) / 10000000ULL + ntp_unix_offset * 100ULL; // 10 ms units
+
+#if false
+        char now_time_str[64];
+        format_ns_since_1900_to_utc(now_ns + ntp_unix_offset * 1000000000ULL, now_time_str, sizeof(now_time_str));
+        LOG_I(NR_MAC, "(%d.%d) Current time to derive SIB9: %s\n", frame, slot, now_time_str);
+        char si_time_str[64];
+        format_ns_since_1900_to_utc(si_window_utc * 10000000ULL, si_time_str, sizeof(si_time_str));
+        LOG_I(NR_MAC, "SIB9 timeInfoUTC: %s\n", si_time_str);
+#endif
+
+        int rc = asn_uint642INTEGER(&sib9->timeInfo->timeInfoUTC, si_window_utc);
+        AssertFatal(rc == 0, "asn_uint642INTEGER() failed for timeInfoUTC\n");
+
+        int len = encode_sysinfo_ie(sysInfo, cc->other_sib_bcch_pdu[0], sizeof(cc->other_sib_bcch_pdu[0]));
+        cc->other_sib_bcch_length[0] = len;
+        if (len <= 0) {
+          LOG_E(NR_MAC, "failed to re-encode otherSIB payload while refreshing SIB9 timeInfoUTC\n");
+        }
+        break;
+      }
+    }
+  }
+  ASN_STRUCT_FREE(asn_DEF_NR_BCCH_DL_SCH_Message, bcch_message);
 }
 
 static void nr_update_sib19_cell(nr_cell_sched_t *cell, const gnb_sat_position_update_t *sat_position)

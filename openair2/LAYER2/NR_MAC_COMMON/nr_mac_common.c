@@ -5395,3 +5395,15 @@ uint16_t nr_pdcch_monitoring_symbols_mask(const BIT_STRING_t *symbols_in_slot, u
               NR_SYMBOLS_PER_SLOT);
   return (symbols_in_slot->buf[0] << (sps - 8)) | (symbols_in_slot->buf[1] >> (16 - sps));
 }
+
+void format_ns_since_1900_to_utc(uint64_t ns_since_1900, char *out, size_t outlen)
+{
+  const uint64_t ntp_unix_offset_ns = 2208988800ULL * 1000000000ULL; // 1900 -> 1970, in ns
+  uint64_t ns_since_1970 = ns_since_1900 - ntp_unix_offset_ns;
+  time_t sec = (time_t)(ns_since_1970 / 1000000000ULL);
+  long ms = (long)((ns_since_1970 % 1000000000ULL) / 1000000ULL);
+  struct tm tm;
+  gmtime_r(&sec, &tm);
+  size_t n = strftime(out, outlen, "%Y-%m-%d %H:%M:%S", &tm);
+  snprintf(out + n, outlen - n, ".%03ld UTC", ms);
+}
